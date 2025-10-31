@@ -19,6 +19,8 @@ pub enum PlayerError {
     InvalidState(String),
     #[error("Decode error: {0}")]
     DecodeError(String),
+    #[error("Invalid volume value: {0}")]
+    InvalidVolume(f32),
 }
 
 /// Current state of the player
@@ -36,6 +38,7 @@ pub struct PlayerStatus {
     pub position: Option<Duration>,
     pub duration: Option<Duration>,
     pub current_file: Option<PathBuf>,
+    pub volume: f32,
 }
 
 /// Player configuration and state
@@ -84,6 +87,29 @@ mod tests {
         assert!(matches!(result.unwrap_err(), PlayerError::UnsupportedFormat(_)));
         #[cfg(not(feature = "audio"))]
         assert!(matches!(result.unwrap_err(), PlayerError::AudioDisabled));
+    }
+
+    #[test]
+    fn test_status_tracking() {
+        let player = Player::new().expect("Failed to create player");
+        let initial_status = player.status();
+        assert_eq!(initial_status.state, PlayerState::Stopped);
+        assert!(initial_status.position.is_none());
+        assert!(initial_status.duration.is_none());
+        assert!(initial_status.current_file.is_none());
+
+        // Create a test file
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
+        let _ = player.play(temp_file.path()); // This will fail but should update state
+
+        let status = player.status();
+        #[cfg(not(feature = "audio"))]
+        assert_eq!(status.state, PlayerState::Stopped);
+        assert!(status.position.is_none());
+        assert!(status.duration.is_none());
+        
+        #[cfg(not(feature = "audio"))]
+        assert!(status.current_file.is_none());
     }
 }
 
@@ -247,6 +273,7 @@ mod audio {
         current_file: Option<PathBuf>,
         start_time: Option<std::time::Instant>,
         paused_position: Option<Duration>,
+        volume: f32,
     }
 
     impl PlayerInner {
@@ -263,6 +290,7 @@ mod audio {
                 current_file: None,
                 start_time: None,
                 paused_position: None,
+                volume: 1.0,
             })
         }
 
@@ -350,6 +378,14 @@ mod audio {
             if let Some(sink) = &self.sink {
                 sink.pause();
                 self.state = PlayerState::Paused;
+                
+                // Store current position when pausing
+                if let Some(start_time) = self.start_time {
+                    let current_pos = start_time.elapsed();
+                    self.paused_position = Some(current_pos);
+                    self.start_time = None;
+                }
+                
                 Ok(())
             } else {
                 Err(PlayerError::InvalidState("No active playback".into()))
@@ -360,6 +396,13 @@ mod audio {
             if let Some(sink) = &self.sink {
                 sink.play();
                 self.state = PlayerState::Playing;
+                
+                // Resume timing from paused position
+                self.start_time = Some(std::time::Instant::now()
+                    .checked_sub(self.paused_position.unwrap_or_default())
+                    .unwrap_or_else(std::time::Instant::now));
+                self.paused_position = None;
+                
                 Ok(())
             } else {
                 Err(PlayerError::InvalidState("No active playback".into()))
@@ -372,6 +415,9 @@ mod audio {
                 self.state = PlayerState::Stopped;
             }
             self.sink = None;
+            self.current_file = None;
+            self.start_time = None;
+            self.paused_position = None;
             Ok(())
         }
 
@@ -400,6 +446,53 @@ mod audio {
 
         pub fn state(&self) -> PlayerState {
             self.state
+        }
+
+        pub fn status(&self) -> PlayerStatus {
+            let position = match (self.state, self.start_time, self.paused_position) {
+                (PlayerState::Playing, Some(start_time), _) => Some(start_time.elapsed()),
+                (PlayerState::Paused, _, Some(pos)) => Some(pos),
+                _ => None,
+            };
+
+            let duration = self.decoder.lock().unwrap()
+                .as_ref()
+                .and_then(|decoder| decoder.duration);
+
+            PlayerStatus {
+                state: self.state,
+                position,
+                duration,
+                current_file: self.current_file.clone(),
+                volume: self.volume,
+            }
+        }
+
+        pub fn set_volume(&mut self, volume: f32) -> Result<(), PlayerError> {
+            // Validate volume is between 0.0 and 1.0
+            if !(0.0..=1.0).contains(&volume) {
+                return Err(PlayerError::InvalidVolume(volume));
+            }
+
+            self.volume = volume;
+            if let Some(sink) = &self.sink {
+                sink.set_volume(volume);
+            }
+            Ok(())
+        }
+
+        pub fn get_volume(&self) -> f32 {
+            self.volume
+        }
+
+        pub fn increase_volume(&mut self) -> Result<(), PlayerError> {
+            let new_volume = (self.volume + 0.1).min(1.0);
+            self.set_volume(new_volume)
+        }
+
+        pub fn decrease_volume(&mut self) -> Result<(), PlayerError> {
+            let new_volume = (self.volume - 0.1).max(0.0);
+            self.set_volume(new_volume)
         }
     }
 }
@@ -494,6 +587,22 @@ impl Player {
         #[cfg(not(feature = "audio"))]
         {
             self.state
+        }
+    }
+
+    pub fn status(&self) -> PlayerStatus {
+        #[cfg(feature = "audio")]
+        {
+            self.inner.lock().unwrap().status()
+        }
+        #[cfg(not(feature = "audio"))]
+        {
+            PlayerStatus {
+                state: self.state,
+                position: None,
+                duration: None,
+                current_file: None,
+            }
         }
     }
 }
