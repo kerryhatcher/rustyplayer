@@ -602,6 +602,7 @@ impl Player {
                 position: None,
                 duration: None,
                 current_file: None,
+                volume: 0.0,
             }
         }
     }
