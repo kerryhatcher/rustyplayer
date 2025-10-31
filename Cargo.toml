@@ -13,6 +13,7 @@ rusqlite = { version = "0.29", features = ["bundled"] }
 walkdir = "2.3"
 directories = "4.0"
 thiserror = "1.0"
+tempfile = "3.8"
 
 [features]
 default = []
